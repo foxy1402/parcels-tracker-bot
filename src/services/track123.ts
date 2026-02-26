@@ -31,14 +31,12 @@ export class Track123Client {
 
   async importTracking(trackingNumber: string, carrierCode?: string): Promise<void> {
     await this.enqueue(async () => {
-      const payload: AnyRecord = {
-        tracking_number: trackingNumber,
-        tracking_number_list: [trackingNumber],
-        trackings: [{ tracking_number: trackingNumber, carrier_code: carrierCode }]
-      };
-      if (carrierCode) {
-        payload.carrier_code = carrierCode;
-      }
+      const payload = [
+        {
+          trackNo: trackingNumber,
+          courierCode: carrierCode
+        }
+      ];
       await this.postWithRetry("/tk/v2/track/import", payload);
     });
   }
@@ -46,11 +44,15 @@ export class Track123Client {
   async queryTracking(trackingNumber: string, carrierCode?: string): Promise<TrackingSnapshot> {
     return this.enqueue(async () => {
       const payload: AnyRecord = {
-        tracking_number: trackingNumber,
-        tracking_number_list: [trackingNumber]
+        trackNos: [trackingNumber]
       };
       if (carrierCode) {
-        payload.carrier_code = carrierCode;
+        payload.trackNoInfos = [
+          {
+            trackNo: trackingNumber,
+            courierCode: carrierCode
+          }
+        ];
       }
 
       const raw = await this.postWithRetry("/tk/v2/track/query", payload);
@@ -105,7 +107,7 @@ export class Track123Client {
     this.pump();
   }
 
-  private async postWithRetry(endpoint: string, body: AnyRecord): Promise<unknown> {
+  private async postWithRetry(endpoint: string, body: unknown): Promise<unknown> {
     const maxAttempts = 4;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -131,7 +133,7 @@ export class Track123Client {
     throw new Error("Unexpected retry loop exit");
   }
 
-  private async post(endpoint: string, body: AnyRecord): Promise<{
+  private async post(endpoint: string, body: unknown): Promise<{
     ok: boolean;
     statusCode: number;
     body: unknown;
@@ -141,6 +143,7 @@ export class Track123Client {
     const response = await request(`${this.baseUrl}${endpoint}`, {
       method: "POST",
       headers: {
+        accept: "application/json",
         "content-type": "application/json",
         "Track123-Api-Secret": this.apiSecret
       },
