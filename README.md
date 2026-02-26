@@ -32,6 +32,7 @@ ALLOWED_USER_IDS=123456789,987654321
 
 - `TRACK123_BASE_URL` default: `https://api.track123.com/gateway/open-api`
 - `DB_PATH` default: `./data/bot.db` (JSON store file; Docker image sets `/data/bot.db`)
+- `TIMEZONE` default: `UTC` (example: `Asia/Ho_Chi_Minh`)
 - `POLL_INTERVAL_SECONDS` default: `300`
 - `TRACK123_MAX_RPS` default: `2`
 - `TRACK123_MAX_CONCURRENCY` default: `2`

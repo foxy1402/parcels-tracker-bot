@@ -2,6 +2,7 @@ import { TrackingSnapshot } from "../types.js";
 
 type FormatOptions = {
   label?: string;
+  timezone?: string;
 };
 
 export function formatSnapshot(snapshot: TrackingSnapshot, options?: FormatOptions): string {
@@ -18,7 +19,7 @@ export function formatSnapshot(snapshot: TrackingSnapshot, options?: FormatOptio
 
   if (snapshot.lastCheckpoint) {
     lines.push("Last checkpoint:");
-    lines.push(`- Time: ${snapshot.lastCheckpoint.time ?? "n/a"}`);
+    lines.push(`- Time: ${formatCheckpointTime(snapshot.lastCheckpoint.time, options?.timezone)}`);
     lines.push(`- Location: ${snapshot.lastCheckpoint.location ?? "n/a"}`);
     lines.push(`- Details: ${snapshot.lastCheckpoint.description ?? "n/a"}`);
   }
@@ -87,4 +88,52 @@ export function humanizeStatus(status: string): string {
   }
 
   return value;
+}
+
+function formatCheckpointTime(time: string | undefined, timezone: string | undefined): string {
+  if (!time) {
+    return "n/a";
+  }
+
+  const date = parseUtcLikeTime(time);
+  if (!date) {
+    return time;
+  }
+
+  const targetTz = timezone?.trim() || "UTC";
+  try {
+    const parts = new Intl.DateTimeFormat("sv-SE", {
+      timeZone: targetTz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    }).formatToParts(date);
+    const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+    return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second} (${targetTz})`;
+  } catch {
+    return time;
+  }
+}
+
+function parseUtcLikeTime(value: string): Date | undefined {
+  // ISO strings with offset/Z are parsed directly.
+  const direct = new Date(value);
+  if (!Number.isNaN(direct.getTime()) && (value.includes("T") || value.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(value))) {
+    return direct;
+  }
+
+  // `YYYY-MM-DD HH:mm:ss` is treated as UTC input.
+  const plainUtc = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(value);
+  if (plainUtc) {
+    const asUtc = new Date(`${plainUtc[1]}T${plainUtc[2]}Z`);
+    if (!Number.isNaN(asUtc.getTime())) {
+      return asUtc;
+    }
+  }
+
+  return undefined;
 }

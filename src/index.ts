@@ -66,13 +66,13 @@ bot.command("track", async (ctx) => {
 
     if (snapshot.terminal) {
       await tryDeleteRemoteTracking(trackingNumber, snapshot.carrierCode ?? carrierCode);
-      await ctx.reply(`This parcel is already in terminal state.\n\n${formatSnapshot(snapshot, { label })}`);
+      await ctx.reply(`This parcel is already in terminal state.\n\n${formatSnapshot(snapshot, { label, timezone: config.timezone })}`);
       watchRepo.removeWatch(ctx.from.id, trackingNumber);
       return;
     }
 
     watchRepo.updateState(ctx.from.id, trackingNumber, snapshotHash(snapshot), snapshot.carrierCode ?? carrierCode);
-    await ctx.reply(`Tracking started.\n\n${formatSnapshot(snapshot, { label })}`);
+    await ctx.reply(`Tracking started.\n\n${formatSnapshot(snapshot, { label, timezone: config.timezone })}`);
   } catch (error) {
     logger.error({ err: error, trackingNumber }, "track command failed");
     await ctx.reply("Unable to track this parcel right now. Try again later or provide an explicit carrier code.");
@@ -98,7 +98,7 @@ bot.command("status", async (ctx) => {
         } else {
           watchRepo.updateState(ctx.from.id, watch.trackingNumber, snapshotHash(refreshed), refreshed.carrierCode);
         }
-        await ctx.reply(formatSnapshot(refreshed, { label: watch.label }));
+        await ctx.reply(formatSnapshot(refreshed, { label: watch.label, timezone: config.timezone }));
       } catch (error) {
         logger.error({ err: error, trackingNumber: watch.trackingNumber }, "status refresh failed");
         await ctx.reply(`Unable to fetch status for ${watch.trackingNumber}.`);
@@ -118,7 +118,7 @@ bot.command("status", async (ctx) => {
     } else if (watch) {
       watchRepo.updateState(ctx.from.id, watch.trackingNumber, snapshotHash(snapshot), snapshot.carrierCode);
     }
-    await ctx.reply(formatSnapshot(snapshot, { label: watch?.label }));
+    await ctx.reply(formatSnapshot(snapshot, { label: watch?.label, timezone: config.timezone }));
   } catch (error) {
     logger.error({ err: error, trackingNumber }, "status command failed");
     await ctx.reply("Unable to fetch status right now.");
