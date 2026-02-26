@@ -78,6 +78,19 @@ If your platform says "Add Storage", set mount path to:
 
 Without mounting `/data`, your tracked parcel list will be lost on pod/container restart.
 
+If `/data` is mounted but you get `EACCES: permission denied, open '/data/bot.db.tmp'`,
+your volume permissions do not allow the container user to write.
+
+This image now handles restricted platforms automatically:
+
+- It tries to use `DB_PATH` (default `/data/bot.db`).
+- If not writable, it auto-falls back to `/tmp/bot.db` so the bot still starts.
+
+Important:
+
+- `/tmp/bot.db` is non-persistent (data resets on restart).
+- For persistence, storage at `/data` must be writable.
+
 ## GitHub Actions -> GHCR
 
 Workflow file: `.github/workflows/docker-publish.yml`

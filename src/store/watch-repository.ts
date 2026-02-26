@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
@@ -9,7 +9,10 @@ type StoreFile = {
 };
 
 export class WatchRepository {
-  constructor(private readonly filePath: string = config.dbPath) {
+  private readonly filePath: string;
+
+  constructor(filePath: string = config.dbPath) {
+    this.filePath = this.resolveWritablePath(filePath);
     mkdirSync(dirname(this.filePath), { recursive: true });
     if (!this.exists()) {
       this.writeStore({ watches: [] });
@@ -97,6 +100,35 @@ export class WatchRepository {
     const tempPath = `${this.filePath}.tmp`;
     writeFileSync(tempPath, JSON.stringify(data, null, 2), "utf8");
     renameSync(tempPath, this.filePath);
+  }
+
+  private resolveWritablePath(targetPath: string): string {
+    if (this.canWriteTo(targetPath)) {
+      return targetPath;
+    }
+
+    const fallbackPath = "/tmp/bot.db";
+    if (this.canWriteTo(fallbackPath)) {
+      logger.warn(
+        { requestedPath: targetPath, fallbackPath },
+        "configured DB_PATH is not writable; falling back to /tmp (non-persistent)"
+      );
+      return fallbackPath;
+    }
+
+    throw new Error(`DB_PATH is not writable and fallback failed: requested=${targetPath}, fallback=${fallbackPath}`);
+  }
+
+  private canWriteTo(targetPath: string): boolean {
+    try {
+      mkdirSync(dirname(targetPath), { recursive: true });
+      const probe = `${targetPath}.probe-${process.pid}-${Date.now()}`;
+      writeFileSync(probe, "ok", "utf8");
+      unlinkSync(probe);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private backupCorruptFile(): void {
