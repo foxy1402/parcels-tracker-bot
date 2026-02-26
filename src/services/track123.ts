@@ -56,7 +56,8 @@ export class Track123Client {
             trackNos: [trackingNumber]
           };
       const raw = await this.postWithRetry("/tk/v2.1/track/query", payload);
-      return normalizeSnapshot(raw, trackingNumber, carrierCode);
+      const record = extractQueryRecordOrThrow(raw, trackingNumber);
+      return normalizeSnapshot(record, trackingNumber, carrierCode);
     });
   }
 
@@ -376,6 +377,38 @@ function asRecord(value: unknown): AnyRecord | undefined {
     return undefined;
   }
   return value as AnyRecord;
+}
+
+function extractQueryRecordOrThrow(raw: unknown, trackingNumber: string): AnyRecord {
+  const body = asRecord(raw);
+  const data = asRecord(body?.data);
+  const accepted = asRecord(data?.accepted);
+  const content = Array.isArray(accepted?.content) ? accepted.content : [];
+
+  const exact = content
+    .map((item) => asRecord(item))
+    .filter((item): item is AnyRecord => Boolean(item))
+    .find((item) => firstString(item, ["trackNo", "tracking_number", "trackingNumber"])?.toUpperCase() === trackingNumber.toUpperCase());
+
+  if (exact) {
+    return exact;
+  }
+
+  const first = content.map((item) => asRecord(item)).find((item): item is AnyRecord => Boolean(item));
+  if (first) {
+    return first;
+  }
+
+  const rejected = Array.isArray(data?.rejected) ? data.rejected : [];
+  if (rejected.length > 0) {
+    const firstRejected = asRecord(rejected[0]);
+    const err = asRecord(firstRejected?.error);
+    const errCode = firstString(err ?? {}, ["code"]) ?? "UNKNOWN";
+    const errMsg = firstString(err ?? {}, ["msg", "message"]) ?? "query rejected";
+    throw new Error(`Track123 query rejected (${errCode}): ${errMsg}`);
+  }
+
+  throw new Error("Track123 query returned no accepted records");
 }
 
 function isTrack123Success(value: unknown): boolean {
