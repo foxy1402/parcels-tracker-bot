@@ -189,7 +189,10 @@ export function snapshotHash(snapshot: TrackingSnapshot): string {
 
 export function normalizeSnapshot(raw: unknown, trackingNumber: string, carrierCode?: string): TrackingSnapshot {
   const record = findParcelRecord(raw, trackingNumber) ?? {};
-  const status =
+  const checkpoints = extractCheckpoints(record);
+  const lastCheckpoint = checkpoints[0];
+
+  const rawStatus =
     firstString(record, [
       "status",
       "track_status",
@@ -198,20 +201,20 @@ export function normalizeSnapshot(raw: unknown, trackingNumber: string, carrierC
       "trackingStatus",
       "transitStatus"
     ]) ?? "unknown";
+
+  const status = lastCheckpoint?.description ?? rawStatus;
   const logistics = asRecord(record.localLogisticsInfo);
   const resolvedCarrier =
     firstString(record, ["carrier_code", "carrierCode", "carrier", "shipping_carrier", "courierCode"]) ??
     firstString(logistics ?? {}, ["courierCode"]) ??
     carrierCode;
-
-  const checkpoints = extractCheckpoints(record);
-  const lastCheckpoint = checkpoints[0];
+  const terminalSignal = [rawStatus, firstString(record, ["transitStatus"]) ?? "", status].join(" ");
 
   return {
     trackingNumber,
     carrierCode: resolvedCarrier,
     status,
-    terminal: isTerminal(status),
+    terminal: isTerminal(terminalSignal),
     lastCheckpoint
   };
 }
@@ -242,14 +245,18 @@ function extractCheckpoints(record: AnyRecord): TrackingCheckpoint[] {
       arrays.push(value);
     }
   }
+  const logistics = asRecord(record.localLogisticsInfo);
+  if (logistics && Array.isArray(logistics.trackingDetails)) {
+    arrays.push(logistics.trackingDetails);
+  }
 
   const flattened = arrays.flatMap((arr) => arr as unknown[]);
   const mapped = flattened
     .filter((v): v is AnyRecord => typeof v === "object" && v !== null)
     .map((v) => ({
-      time: firstString(v, ["time", "event_time", "checkpoint_time", "date", "created_at"]),
-      location: firstString(v, ["location", "city", "country", "place"]),
-      description: firstString(v, ["description", "status", "event", "details", "checkpoint_description"])
+      time: firstString(v, ["time", "event_time", "checkpoint_time", "date", "created_at", "eventTime", "eventTimeZeroUTC"]),
+      location: firstString(v, ["location", "city", "country", "place", "address"]),
+      description: firstString(v, ["description", "status", "event", "details", "checkpoint_description", "eventDetail"])
     }))
     .filter((v) => v.time || v.location || v.description);
 
@@ -258,6 +265,12 @@ function extractCheckpoints(record: AnyRecord): TrackingCheckpoint[] {
 
 function isTerminal(status: string): boolean {
   const normalized = status.toLowerCase();
+  if (/^\d{3}$/.test(normalized)) {
+    const code = Number(normalized);
+    if (code >= 300 && code < 400) {
+      return true;
+    }
+  }
   return TERMINAL_WORDS.some((word) => normalized.includes(word));
 }
 

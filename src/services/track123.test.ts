@@ -31,7 +31,7 @@ test("normalizeSnapshot picks tracking record from wrapped response data", () =>
   const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
 
   assert.equal(snapshot.trackingNumber, "SPXVN064584367312");
-  assert.equal(snapshot.status, "Delivered");
+  assert.equal(snapshot.status, "Package delivered");
   assert.equal(snapshot.carrierCode, "SPXVN");
   assert.equal(snapshot.terminal, true);
   assert.equal(snapshot.lastCheckpoint?.location, "Ho Chi Minh City");
@@ -73,4 +73,39 @@ test("normalizeSnapshot supports trackingStatus/transitStatus shape", () => {
   const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
   assert.equal(snapshot.status, "001");
   assert.equal(snapshot.carrierCode, "shopeeexpressvn");
+});
+
+test("normalizeSnapshot prefers latest tracking event detail as status text", () => {
+  const raw = {
+    data: {
+      accepted: {
+        content: [
+          {
+            trackNo: "SPXVN064584367312",
+            trackingStatus: "001",
+            transitStatus: "IN_TRANSIT",
+            localLogisticsInfo: {
+              courierCode: "shopeeexpressvn",
+              trackingDetails: [
+                {
+                  eventTime: "2026-02-26 01:50:28",
+                  eventDetail: "Người gửi đang chuẩn bị hàng",
+                  address: ""
+                },
+                {
+                  eventTime: "2026-02-26 01:40:00",
+                  eventDetail: "SLSTN đã được tạo, đang gửi yêu cầu đến đối tác vận chuyển",
+                  address: ""
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  };
+
+  const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
+  assert.equal(snapshot.status, "Người gửi đang chuẩn bị hàng");
+  assert.equal(snapshot.lastCheckpoint?.description, "Người gửi đang chuẩn bị hàng");
 });
