@@ -61,13 +61,27 @@ docker run -d --name parcels-tracker-bot \
   -e TRACK123_API_SECRET=... \
   -e ALLOWED_USER_IDS=123456789 \
   -v parcels_bot_data:/data \
-  ghcr.io/<owner>/parcels-tracker-bot:latest
+  ghcr.io/foxy1402/parcels-tracker-bot:latest
 ```
+
+Image:
+
+- `ghcr.io/foxy1402/parcels-tracker-bot:latest`
+
+## Kubernetes Storage (Important)
+
+This image stores watch data at `DB_PATH=/data/bot.db` by default.
+
+If your platform says "Add Storage", set mount path to:
+
+- `/data`
+
+Without mounting `/data`, your tracked parcel list will be lost on pod/container restart.
 
 ## GitHub Actions -> GHCR
 
 Workflow file: `.github/workflows/docker-publish.yml`
 
-On push to `main` or tags `v*`, image is pushed to:
+On push to `main` or tags `v*`, image is pushed as:
 
-`ghcr.io/<github_owner>/parcels-tracker-bot`
+`ghcr.io/foxy1402/parcels-tracker-bot:latest`
