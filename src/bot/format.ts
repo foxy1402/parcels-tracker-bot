@@ -20,8 +20,13 @@ export function formatSnapshot(snapshot: TrackingSnapshot, options?: FormatOptio
   if (snapshot.lastCheckpoint) {
     lines.push("Last checkpoint:");
     lines.push(`- Time: ${formatCheckpointTime(snapshot.lastCheckpoint.time, options?.timezone)}`);
-    lines.push(`- Location: ${snapshot.lastCheckpoint.location ?? "n/a"}`);
-    lines.push(`- Details: ${snapshot.lastCheckpoint.description ?? "n/a"}`);
+    if (snapshot.lastCheckpoint.location) {
+      lines.push(`- Location: ${snapshot.lastCheckpoint.location}`);
+    }
+    const details = snapshot.lastCheckpoint.description?.trim();
+    if (details && details !== snapshot.status.trim()) {
+      lines.push(`- Details: ${details}`);
+    }
   }
 
   if (snapshot.terminal) {
@@ -113,7 +118,7 @@ function formatCheckpointTime(time: string | undefined, timezone: string | undef
       hour12: false
     }).formatToParts(date);
     const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
-    return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second} (${targetTz})`;
+    return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
   } catch {
     return time;
   }
