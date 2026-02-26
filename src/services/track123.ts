@@ -43,18 +43,18 @@ export class Track123Client {
 
   async queryTracking(trackingNumber: string, carrierCode?: string): Promise<TrackingSnapshot> {
     return this.enqueue(async () => {
-      const payload: AnyRecord = {
-        trackNos: [trackingNumber]
-      };
-      if (carrierCode) {
-        payload.trackNoInfos = [
-          {
-            trackNo: trackingNumber,
-            courierCode: carrierCode
+      const payload: AnyRecord = carrierCode
+        ? {
+            trackNoInfos: [
+              {
+                trackNo: trackingNumber,
+                courierCode: carrierCode
+              }
+            ]
           }
-        ];
-      }
-
+        : {
+            trackNos: [trackingNumber]
+          };
       const raw = await this.postWithRetry("/tk/v2.1/track/query", payload);
       return normalizeSnapshot(raw, trackingNumber, carrierCode);
     });
