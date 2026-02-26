@@ -36,7 +36,7 @@ bot.start(async (ctx) => {
       "",
       "Commands:",
       "/track <tracking_number> [carrier:code] [label]",
-      "/status <tracking_number> [carrier_code]",
+      "/status [tracking_number] [carrier_code]",
       "/list",
       "/untrack <tracking_number>",
       "",
@@ -81,7 +81,27 @@ bot.command("track", async (ctx) => {
 bot.command("status", async (ctx) => {
   const [trackingNumber, carrierCode] = parseBaseArgs(ctx.message.text);
   if (!trackingNumber) {
-    await ctx.reply("Usage: /status <tracking_number> [carrier_code]");
+    const watches = watchRepo.listByUser(ctx.from.id);
+    if (watches.length === 0) {
+      await ctx.reply("No active tracked parcels.");
+      return;
+    }
+
+    await ctx.reply(`Refreshing ${watches.length} tracked parcel(s)...`);
+    for (const watch of watches) {
+      try {
+        const snapshot = await trackClient.queryTracking(watch.trackingNumber, watch.carrierCode);
+        if (snapshot.terminal) {
+          watchRepo.removeWatch(ctx.from.id, watch.trackingNumber);
+        } else {
+          watchRepo.updateState(ctx.from.id, watch.trackingNumber, snapshotHash(snapshot), snapshot.carrierCode);
+        }
+        await ctx.reply(formatSnapshot(snapshot, { label: watch.label }));
+      } catch (error) {
+        logger.error({ err: error, trackingNumber: watch.trackingNumber }, "status refresh failed");
+        await ctx.reply(`Unable to fetch status for ${watch.trackingNumber}.`);
+      }
+    }
     return;
   }
 
@@ -90,6 +110,11 @@ bot.command("status", async (ctx) => {
       .listByUser(ctx.from.id)
       .find((w) => w.trackingNumber.toUpperCase() === trackingNumber.toUpperCase());
     const snapshot = await trackClient.queryTracking(trackingNumber, carrierCode ?? watch?.carrierCode);
+    if (snapshot.terminal && watch) {
+      watchRepo.removeWatch(ctx.from.id, watch.trackingNumber);
+    } else if (watch) {
+      watchRepo.updateState(ctx.from.id, watch.trackingNumber, snapshotHash(snapshot), snapshot.carrierCode);
+    }
     await ctx.reply(formatSnapshot(snapshot, { label: watch?.label }));
   } catch (error) {
     logger.error({ err: error, trackingNumber }, "status command failed");

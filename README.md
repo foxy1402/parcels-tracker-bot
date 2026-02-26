@@ -5,7 +5,7 @@ Telegram bot for parcel tracking via Track123.
 ## Features
 
 - `/track <tracking_number> [carrier:code] [label]`
-- `/status <tracking_number> [carrier_code]`
+- `/status [tracking_number] [carrier_code]`
 - `/list`
 - `/untrack <tracking_number>`
 - Auto polling updates to Telegram
@@ -49,6 +49,8 @@ npm start
 ```bash
 /track SPXVN064584367312 áo cho mập
 /track SPXVN064584367312 carrier:SPXVN áo cho mập
+/status
+/status SPXVN064584367312
 ```
 
 ## Docker Run
