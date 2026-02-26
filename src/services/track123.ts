@@ -37,7 +37,7 @@ export class Track123Client {
           courierCode: carrierCode
         }
       ];
-      await this.postWithRetry("/tk/v2/track/import", payload);
+      await this.postWithRetry("/tk/v2.1/track/import", payload);
     });
   }
 
@@ -55,7 +55,7 @@ export class Track123Client {
         ];
       }
 
-      const raw = await this.postWithRetry("/tk/v2/track/query", payload);
+      const raw = await this.postWithRetry("/tk/v2.1/track/query", payload);
       return normalizeSnapshot(raw, trackingNumber, carrierCode);
     });
   }
