@@ -41,7 +41,7 @@ export function startPoller(
 
     for (const watch of watches) {
       try {
-        const snapshot = await trackClient.queryTracking(watch.trackingNumber, watch.carrierCode);
+        const snapshot = await queryWithCarrierFallback(trackClient, watch.trackingNumber, watch.carrierCode);
         const hash = snapshotHash(snapshot);
 
         if (watch.lastStatusHash === hash) {
@@ -52,6 +52,17 @@ export function startPoller(
         await bot.telegram.sendMessage(watch.userId, `${title}:\n\n${formatSnapshot(snapshot, { label: watch.label })}`);
 
         if (snapshot.terminal) {
+          const deleteCarrier = snapshot.carrierCode ?? watch.carrierCode;
+          if (deleteCarrier) {
+            try {
+              await trackClient.deleteTracking(watch.trackingNumber, deleteCarrier);
+            } catch (error) {
+              logger.warn(
+                { err: error, trackingNumber: watch.trackingNumber, userId: watch.userId },
+                "failed to delete terminal tracking from Track123"
+              );
+            }
+          }
           repo.removeWatch(watch.userId, watch.trackingNumber);
           logger.info({ trackingNumber: watch.trackingNumber, userId: watch.userId }, "removed delivered watch");
           continue;
@@ -76,4 +87,16 @@ export function startPoller(
       }
     }
   };
+}
+
+async function queryWithCarrierFallback(trackClient: Track123Client, trackingNumber: string, carrierCode?: string) {
+  try {
+    return await trackClient.queryTracking(trackingNumber, carrierCode);
+  } catch (error) {
+    if (!carrierCode) {
+      throw error;
+    }
+    logger.warn({ err: error, trackingNumber, carrierCode }, "carrier query failed, retrying without carrier");
+    return trackClient.queryTracking(trackingNumber);
+  }
 }

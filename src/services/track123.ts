@@ -60,6 +60,18 @@ export class Track123Client {
     });
   }
 
+  async deleteTracking(trackingNumber: string, carrierCode: string): Promise<void> {
+    await this.enqueue(async () => {
+      const payload = [
+        {
+          trackNo: trackingNumber,
+          courierCode: carrierCode
+        }
+      ];
+      await this.postWithRetry("/tk/v2.1/track/delete", payload);
+    });
+  }
+
   private enqueue<T>(run: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.queue.push({
@@ -162,9 +174,10 @@ export class Track123Client {
 
     const retryAfterHeader = response.headers["retry-after"];
     const retryAfterSeconds = Array.isArray(retryAfterHeader) ? retryAfterHeader[0] : retryAfterHeader;
+    const appOk = isTrack123Success(parsed);
 
     return {
-      ok: response.statusCode >= 200 && response.statusCode < 300,
+      ok: response.statusCode >= 200 && response.statusCode < 300 && appOk,
       statusCode: response.statusCode,
       body: parsed,
       bodyText: typeof parsed === "string" ? parsed : JSON.stringify(parsed),
@@ -208,13 +221,14 @@ export function normalizeSnapshot(raw: unknown, trackingNumber: string, carrierC
     firstString(record, ["carrier_code", "carrierCode", "carrier", "shipping_carrier", "courierCode"]) ??
     firstString(logistics ?? {}, ["courierCode"]) ??
     carrierCode;
-  const terminalSignal = [rawStatus, firstString(record, ["transitStatus"]) ?? "", status].join(" ");
+  const transitStatus = firstString(record, ["transitStatus"]);
+  const terminalSignals = [rawStatus, transitStatus, status].filter((v): v is string => Boolean(v));
 
   return {
     trackingNumber,
     carrierCode: resolvedCarrier,
     status,
-    terminal: isTerminal(terminalSignal),
+    terminal: isTerminal(...terminalSignals),
     lastCheckpoint
   };
 }
@@ -263,15 +277,23 @@ function extractCheckpoints(record: AnyRecord): TrackingCheckpoint[] {
   return mapped.sort((a, b) => `${b.time ?? ""}`.localeCompare(`${a.time ?? ""}`));
 }
 
-function isTerminal(status: string): boolean {
-  const normalized = status.toLowerCase();
-  if (/^\d{3}$/.test(normalized)) {
-    const code = Number(normalized);
-    if (code >= 300 && code < 400) {
+function isTerminal(...signals: string[]): boolean {
+  for (const signal of signals) {
+    const normalized = signal.toLowerCase();
+
+    const codeMatches = normalized.match(/\b(\d{3})\b/g) ?? [];
+    for (const codeText of codeMatches) {
+      const code = Number(codeText);
+      if (code >= 300 && code < 400) {
+        return true;
+      }
+    }
+
+    if (TERMINAL_WORDS.some((word) => normalized.includes(word))) {
       return true;
     }
   }
-  return TERMINAL_WORDS.some((word) => normalized.includes(word));
+  return false;
 }
 
 function firstString(obj: AnyRecord, keys: string[]): string | undefined {
@@ -354,4 +376,30 @@ function asRecord(value: unknown): AnyRecord | undefined {
     return undefined;
   }
   return value as AnyRecord;
+}
+
+function isTrack123Success(value: unknown): boolean {
+  const body = asRecord(value);
+  if (!body) {
+    return true;
+  }
+
+  const code = body.code;
+  if (typeof code === "string") {
+    return code === "00000";
+  }
+
+  const msg = body.msg;
+  if (typeof msg === "string" && msg.trim()) {
+    const normalized = msg.trim().toLowerCase();
+    return normalized === "success";
+  }
+
+  const message = body.message;
+  if (typeof message === "string" && message.trim()) {
+    // Track123 non-success bodies can return only `message` with 2xx/4xx.
+    return false;
+  }
+
+  return true;
 }

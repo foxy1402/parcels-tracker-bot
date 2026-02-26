@@ -38,7 +38,7 @@ bot.start(async (ctx) => {
       "/track <tracking_number> [carrier:code] [label]",
       "/status [tracking_number] [carrier_code]",
       "/list",
-      "/untrack <tracking_number>",
+      "/untrack <tracking_number> [carrier_code]",
       "",
       "Examples:",
       "/track SPXVN064584367312 áo cho mập",
@@ -61,10 +61,11 @@ bot.command("track", async (ctx) => {
   }
 
   try {
-    const snapshot = await trackClient.queryTracking(trackingNumber, carrierCode);
+    const snapshot = await queryWithCarrierFallback(trackingNumber, carrierCode);
     watchRepo.upsertWatch(ctx.from.id, trackingNumber, snapshot.carrierCode ?? carrierCode, label);
 
     if (snapshot.terminal) {
+      await tryDeleteRemoteTracking(trackingNumber, snapshot.carrierCode ?? carrierCode);
       await ctx.reply(`This parcel is already in terminal state.\n\n${formatSnapshot(snapshot, { label })}`);
       watchRepo.removeWatch(ctx.from.id, trackingNumber);
       return;
@@ -90,13 +91,14 @@ bot.command("status", async (ctx) => {
     await ctx.reply(`Refreshing ${watches.length} tracked parcel(s)...`);
     for (const watch of watches) {
       try {
-        const snapshot = await trackClient.queryTracking(watch.trackingNumber, watch.carrierCode);
-        if (snapshot.terminal) {
+        const refreshed = await queryWithCarrierFallback(watch.trackingNumber, watch.carrierCode);
+        if (refreshed.terminal) {
+          await tryDeleteRemoteTracking(watch.trackingNumber, refreshed.carrierCode ?? watch.carrierCode);
           watchRepo.removeWatch(ctx.from.id, watch.trackingNumber);
         } else {
-          watchRepo.updateState(ctx.from.id, watch.trackingNumber, snapshotHash(snapshot), snapshot.carrierCode);
+          watchRepo.updateState(ctx.from.id, watch.trackingNumber, snapshotHash(refreshed), refreshed.carrierCode);
         }
-        await ctx.reply(formatSnapshot(snapshot, { label: watch.label }));
+        await ctx.reply(formatSnapshot(refreshed, { label: watch.label }));
       } catch (error) {
         logger.error({ err: error, trackingNumber: watch.trackingNumber }, "status refresh failed");
         await ctx.reply(`Unable to fetch status for ${watch.trackingNumber}.`);
@@ -109,8 +111,9 @@ bot.command("status", async (ctx) => {
     const watch = watchRepo
       .listByUser(ctx.from.id)
       .find((w) => w.trackingNumber.toUpperCase() === trackingNumber.toUpperCase());
-    const snapshot = await trackClient.queryTracking(trackingNumber, carrierCode ?? watch?.carrierCode);
+    const snapshot = await queryWithCarrierFallback(trackingNumber, carrierCode ?? watch?.carrierCode);
     if (snapshot.terminal && watch) {
+      await tryDeleteRemoteTracking(watch.trackingNumber, snapshot.carrierCode ?? watch.carrierCode);
       watchRepo.removeWatch(ctx.from.id, watch.trackingNumber);
     } else if (watch) {
       watchRepo.updateState(ctx.from.id, watch.trackingNumber, snapshotHash(snapshot), snapshot.carrierCode);
@@ -136,11 +139,17 @@ bot.command("list", async (ctx) => {
 });
 
 bot.command("untrack", async (ctx) => {
-  const [trackingNumber] = parseBaseArgs(ctx.message.text);
+  const [trackingNumber, carrierCode] = parseBaseArgs(ctx.message.text);
   if (!trackingNumber) {
-    await ctx.reply("Usage: /untrack <tracking_number>");
+    await ctx.reply("Usage: /untrack <tracking_number> [carrier_code]");
     return;
   }
+
+  const watch = watchRepo
+    .listByUser(ctx.from.id)
+    .find((w) => w.trackingNumber.toUpperCase() === trackingNumber.toUpperCase());
+  const resolvedCarrier = carrierCode ?? watch?.carrierCode;
+  await tryDeleteRemoteTracking(trackingNumber, resolvedCarrier);
 
   const removed = watchRepo.removeWatch(ctx.from.id, trackingNumber);
   if (removed === 0) {
@@ -176,3 +185,26 @@ bootstrap().catch((error) => {
   logger.fatal({ err: error }, "failed to start bot");
   process.exit(1);
 });
+
+async function tryDeleteRemoteTracking(trackingNumber: string, carrierCode?: string): Promise<void> {
+  if (!carrierCode) {
+    return;
+  }
+  try {
+    await trackClient.deleteTracking(trackingNumber, carrierCode);
+  } catch (error) {
+    logger.warn({ err: error, trackingNumber, carrierCode }, "failed deleting tracking from Track123");
+  }
+}
+
+async function queryWithCarrierFallback(trackingNumber: string, carrierCode?: string) {
+  try {
+    return await trackClient.queryTracking(trackingNumber, carrierCode);
+  } catch (error) {
+    if (!carrierCode) {
+      throw error;
+    }
+    logger.warn({ err: error, trackingNumber, carrierCode }, "carrier query failed, retrying without carrier");
+    return trackClient.queryTracking(trackingNumber);
+  }
+}

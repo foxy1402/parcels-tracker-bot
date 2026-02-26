@@ -7,9 +7,10 @@ Telegram bot for parcel tracking via Track123.
 - `/track <tracking_number> [carrier:code] [label]`
 - `/status [tracking_number] [carrier_code]`
 - `/list`
-- `/untrack <tracking_number>`
+- `/untrack <tracking_number> [carrier_code]`
 - Auto polling updates to Telegram
 - Auto remove watch entries when parcel reaches terminal status
+- Auto delete tracking from Track123 on terminal status and `/untrack` (when carrier is known)
 - Access control with `ALLOWED_USER_IDS`
 - UTF-8 labels (for example: `/track SPXVN064584367312 áo cho mập`)
 
