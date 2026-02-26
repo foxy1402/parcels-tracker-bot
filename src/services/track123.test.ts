@@ -51,3 +51,26 @@ test("normalizeSnapshot falls back to explicit carrier when not present in paylo
   assert.equal(snapshot.carrierCode, "SPXVN");
   assert.equal(snapshot.terminal, false);
 });
+
+test("normalizeSnapshot supports trackingStatus/transitStatus shape", () => {
+  const raw = {
+    data: {
+      accepted: {
+        content: [
+          {
+            trackNo: "SPXVN064584367312",
+            trackingStatus: "001",
+            transitStatus: "INIT",
+            localLogisticsInfo: {
+              courierCode: "shopeeexpressvn"
+            }
+          }
+        ]
+      }
+    }
+  };
+
+  const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
+  assert.equal(snapshot.status, "001");
+  assert.equal(snapshot.carrierCode, "shopeeexpressvn");
+});

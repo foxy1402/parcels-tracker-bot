@@ -145,6 +145,7 @@ export class Track123Client {
       headers: {
         accept: "application/json",
         "content-type": "application/json",
+        "user-agent": "parcels-tracker-bot/0.1 (+https://github.com/foxy1402/parcels-tracker-bot)",
         "Track123-Api-Secret": this.apiSecret
       },
       body: JSON.stringify(body)
@@ -188,9 +189,20 @@ export function snapshotHash(snapshot: TrackingSnapshot): string {
 
 export function normalizeSnapshot(raw: unknown, trackingNumber: string, carrierCode?: string): TrackingSnapshot {
   const record = findParcelRecord(raw, trackingNumber) ?? {};
-  const status = firstString(record, ["status", "track_status", "latest_status", "status_description"]) ?? "unknown";
+  const status =
+    firstString(record, [
+      "status",
+      "track_status",
+      "latest_status",
+      "status_description",
+      "trackingStatus",
+      "transitStatus"
+    ]) ?? "unknown";
+  const logistics = asRecord(record.localLogisticsInfo);
   const resolvedCarrier =
-    firstString(record, ["carrier_code", "carrierCode", "carrier", "shipping_carrier"]) ?? carrierCode;
+    firstString(record, ["carrier_code", "carrierCode", "carrier", "shipping_carrier", "courierCode"]) ??
+    firstString(logistics ?? {}, ["courierCode"]) ??
+    carrierCode;
 
   const checkpoints = extractCheckpoints(record);
   const lastCheckpoint = checkpoints[0];
@@ -208,7 +220,7 @@ function findParcelRecord(raw: unknown, trackingNumber: string): AnyRecord | und
   const candidates = collectLikelyParcelRecords(raw);
 
   const exact = candidates.find((c) => {
-    const n = firstString(c, ["tracking_number", "trackingNumber", "number", "track_number"]);
+    const n = firstString(c, ["tracking_number", "trackingNumber", "number", "track_number", "trackNo"]);
     return n?.toUpperCase() === trackingNumber.toUpperCase();
   });
 
@@ -278,7 +290,7 @@ function collectLikelyParcelRecords(root: unknown): AnyRecord[] {
   const records: AnyRecord[] = [];
   for (const node of roots) {
     walk(node, (obj) => {
-      if (hasAnyKey(obj, ["tracking_number", "trackingNumber", "number", "track_number"])) {
+      if (hasAnyKey(obj, ["tracking_number", "trackingNumber", "number", "track_number", "trackNo"])) {
         records.push(obj);
         return;
       }
