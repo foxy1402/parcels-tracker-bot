@@ -199,3 +199,63 @@ test("normalizeSnapshot keeps failed-with-reattempt flow non-terminal", () => {
   const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
   assert.equal(snapshot.terminal, false);
 });
+
+test("normalizeSnapshot marks final undeliverable exception as terminal", () => {
+  const raw = {
+    data: {
+      accepted: {
+        content: [
+          {
+            trackNo: "SPXVN064584367312",
+            trackingStatus: "001",
+            transitStatus: "EXCEPTION",
+            transitSubStatus: "UNDELIVERABLE_FINAL",
+            localLogisticsInfo: {
+              courierCode: "shopeeexpressvn",
+              trackingDetails: [
+                {
+                  eventTimeZeroUTC: "2026-02-27T04:35:33Z",
+                  eventDetail: "Package is undeliverable and has been cancelled",
+                  transitSubStatus: "UNDELIVERABLE_FINAL"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  };
+
+  const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
+  assert.equal(snapshot.terminal, true);
+});
+
+test("normalizeSnapshot keeps exception with reattempt hint non-terminal", () => {
+  const raw = {
+    data: {
+      accepted: {
+        content: [
+          {
+            trackNo: "SPXVN064584367312",
+            trackingStatus: "001",
+            transitStatus: "EXCEPTION",
+            transitSubStatus: "DELIVERY_ATTEMPT_FAILED",
+            localLogisticsInfo: {
+              courierCode: "shopeeexpressvn",
+              trackingDetails: [
+                {
+                  eventTimeZeroUTC: "2026-02-27T04:35:33Z",
+                  eventDetail: "Undeliverable today, courier will reattempt tomorrow",
+                  transitSubStatus: "DELIVERY_ATTEMPT_FAILED"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  };
+
+  const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
+  assert.equal(snapshot.terminal, false);
+});

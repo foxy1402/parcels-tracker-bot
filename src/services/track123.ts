@@ -24,6 +24,32 @@ const TERMINAL_PHRASES = [
   "hoan hang",
   "hoàn hàng"
 ];
+const FINAL_EXCEPTION_PHRASES = [
+  "lost",
+  "package lost",
+  "parcel lost",
+  "destroyed",
+  "disposed",
+  "undeliverable",
+  "delivery impossible",
+  "cancelled",
+  "canceled",
+  "shipment cancelled",
+  "shipment canceled",
+  "cannot be delivered",
+  "failed permanently",
+  "returned to origin"
+];
+const NON_TERMINAL_RETRY_HINTS = [
+  "reattempt",
+  "re-attempt",
+  "retry",
+  "will attempt",
+  "attempt again",
+  "second attempt",
+  "next delivery attempt",
+  "rescheduled"
+];
 
 export class Track123Client {
   private readonly queue: Array<QueueTask> = [];
@@ -314,6 +340,13 @@ function isTerminal(...signals: string[]): boolean {
       return true;
     }
     if (/\b(returning_to_sender|returned_to_sender|delivered|delivery_success)\b/i.test(signal)) {
+      return true;
+    }
+    const hasRetryHint = NON_TERMINAL_RETRY_HINTS.some((hint) => normalized.includes(hint));
+    if (!hasRetryHint && FINAL_EXCEPTION_PHRASES.some((phrase) => normalized.includes(phrase))) {
+      return true;
+    }
+    if (!hasRetryHint && /\b(canceled|cancelled|undeliverable|lost|destroyed|disposed)\b/i.test(signal)) {
       return true;
     }
   }
