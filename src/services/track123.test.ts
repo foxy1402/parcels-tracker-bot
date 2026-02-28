@@ -109,3 +109,63 @@ test("normalizeSnapshot prefers latest tracking event detail as status text", ()
   assert.equal(snapshot.status, "Người gửi đang chuẩn bị hàng");
   assert.equal(snapshot.lastCheckpoint?.description, "Người gửi đang chuẩn bị hàng");
 });
+
+test("normalizeSnapshot marks Vietnamese delivered message as terminal", () => {
+  const raw = {
+    data: {
+      accepted: {
+        content: [
+          {
+            trackNo: "SPXVN064584367312",
+            trackingStatus: "001",
+            transitStatus: "ABNORMAL",
+            transitSubStatus: "ABNORMAL_07",
+            localLogisticsInfo: {
+              courierCode: "shopeeexpressvn",
+              trackingDetails: [
+                {
+                  eventTime: "2026-02-27 12:35:33",
+                  eventDetail: "Giao hàng thành công",
+                  transitSubStatus: "DELIVERY_FAILED_04"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  };
+
+  const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
+  assert.equal(snapshot.terminal, true);
+});
+
+test("normalizeSnapshot marks returning-to-sender substatus as terminal", () => {
+  const raw = {
+    data: {
+      accepted: {
+        content: [
+          {
+            trackNo: "SPXVN064584367312",
+            trackingStatus: "001",
+            transitStatus: "EXCEPTION",
+            transitSubStatus: "RETURNING_TO_SENDER",
+            localLogisticsInfo: {
+              courierCode: "shopeeexpressvn",
+              trackingDetails: [
+                {
+                  eventTime: "2026-02-27 12:35:33",
+                  eventDetail: "Returning to sender",
+                  transitSubStatus: "RETURNING_TO_SENDER"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  };
+
+  const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
+  assert.equal(snapshot.terminal, true);
+});

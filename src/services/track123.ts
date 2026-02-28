@@ -12,6 +12,18 @@ type QueueTask = {
 };
 
 const TERMINAL_WORDS = ["delivered", "completed", "done", "signed", "returned", "failed", "exception"];
+const TERMINAL_PHRASES = [
+  "returning to sender",
+  "returned to sender",
+  "giao hang thanh cong",
+  "giao hàng thành công",
+  "da giao hang",
+  "đã giao hàng",
+  "tra hang",
+  "trả hàng",
+  "hoan hang",
+  "hoàn hàng"
+];
 
 export class Track123Client {
   private readonly queue: Array<QueueTask> = [];
@@ -223,7 +235,11 @@ export function normalizeSnapshot(raw: unknown, trackingNumber: string, carrierC
     firstString(logistics ?? {}, ["courierCode"]) ??
     carrierCode;
   const transitStatus = firstString(record, ["transitStatus"]);
-  const terminalSignals = [rawStatus, transitStatus, status].filter((v): v is string => Boolean(v));
+  const transitSubStatus = firstString(record, ["transitSubStatus"]);
+  const latestEventSubStatus = firstTrackingDetailSubStatus(record);
+  const terminalSignals = [rawStatus, transitStatus, transitSubStatus, latestEventSubStatus, status].filter(
+    (v): v is string => Boolean(v)
+  );
 
   return {
     trackingNumber,
@@ -291,6 +307,12 @@ function isTerminal(...signals: string[]): boolean {
     }
 
     if (TERMINAL_WORDS.some((word) => normalized.includes(word))) {
+      return true;
+    }
+    if (TERMINAL_PHRASES.some((phrase) => normalized.includes(phrase))) {
+      return true;
+    }
+    if (/\b(returning_to_sender|returned_to_sender|delivered|delivery_success)\b/i.test(signal)) {
       return true;
     }
   }
@@ -377,6 +399,15 @@ function asRecord(value: unknown): AnyRecord | undefined {
     return undefined;
   }
   return value as AnyRecord;
+}
+
+function firstTrackingDetailSubStatus(record: AnyRecord): string | undefined {
+  const logistics = asRecord(record.localLogisticsInfo);
+  if (!logistics || !Array.isArray(logistics.trackingDetails) || logistics.trackingDetails.length === 0) {
+    return undefined;
+  }
+  const first = asRecord(logistics.trackingDetails[0]);
+  return firstString(first ?? {}, ["transitSubStatus"]);
 }
 
 function extractQueryRecordOrThrow(raw: unknown, trackingNumber: string): AnyRecord {
