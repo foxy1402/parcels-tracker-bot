@@ -169,3 +169,33 @@ test("normalizeSnapshot marks returning-to-sender substatus as terminal", () => 
   const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
   assert.equal(snapshot.terminal, true);
 });
+
+test("normalizeSnapshot keeps failed-with-reattempt flow non-terminal", () => {
+  const raw = {
+    data: {
+      accepted: {
+        content: [
+          {
+            trackNo: "SPXVN064584367312",
+            trackingStatus: "001",
+            transitStatus: "DELIVERING",
+            transitSubStatus: "DELIVERY_ATTEMPT_FAILED",
+            localLogisticsInfo: {
+              courierCode: "shopeeexpressvn",
+              trackingDetails: [
+                {
+                  eventTimeZeroUTC: "2026-02-27T04:35:33Z",
+                  eventDetail: "Delivery failed, courier will reattempt tomorrow",
+                  transitSubStatus: "DELIVERY_ATTEMPT_FAILED"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  };
+
+  const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
+  assert.equal(snapshot.terminal, false);
+});

@@ -11,7 +11,7 @@ type QueueTask = {
   reject: (error: unknown) => void;
 };
 
-const TERMINAL_WORDS = ["delivered", "completed", "done", "signed", "returned", "failed", "exception"];
+const TERMINAL_WORDS = ["delivered", "completed", "done", "signed", "returned"];
 const TERMINAL_PHRASES = [
   "returning to sender",
   "returned to sender",
@@ -285,7 +285,8 @@ function extractCheckpoints(record: AnyRecord): TrackingCheckpoint[] {
   const mapped = flattened
     .filter((v): v is AnyRecord => typeof v === "object" && v !== null)
     .map((v) => ({
-      time: firstString(v, ["time", "event_time", "checkpoint_time", "date", "created_at", "eventTime", "eventTimeZeroUTC"]),
+      // Prefer UTC-normalized event time to avoid timezone mis-conversion downstream.
+      time: firstString(v, ["eventTimeZeroUTC", "time", "event_time", "checkpoint_time", "date", "created_at", "eventTime"]),
       location: firstString(v, ["location", "city", "country", "place", "address"]),
       description: firstString(v, ["description", "status", "event", "details", "checkpoint_description", "eventDetail"])
     }))
