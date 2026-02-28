@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeSnapshot } from "./track123.js";
+import { isRetryableTrack123Result, normalizeSnapshot } from "./track123.js";
 
 test("normalizeSnapshot picks tracking record from wrapped response data", () => {
   const raw = {
@@ -258,4 +258,12 @@ test("normalizeSnapshot keeps exception with reattempt hint non-terminal", () =>
 
   const snapshot = normalizeSnapshot(raw, "SPXVN064584367312");
   assert.equal(snapshot.terminal, false);
+});
+
+test("isRetryableTrack123Result treats A0706 app throttle as retryable", () => {
+  assert.equal(isRetryableTrack123Result(200, { code: "A0706", msg: "The operation is too fast. Please have a rest" }), true);
+});
+
+test("isRetryableTrack123Result keeps non-throttle app errors non-retryable", () => {
+  assert.equal(isRetryableTrack123Result(200, { code: "A0400", msg: "params format error" }), false);
 });

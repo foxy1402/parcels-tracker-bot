@@ -6,6 +6,7 @@ import { Track123Client, snapshotHash } from "./services/track123.js";
 import { formatSnapshot } from "./bot/format.js";
 import { startPoller } from "./jobs/poll-updates.js";
 import { parseBaseArgs, parseTrackArgs } from "./bot/command-args.js";
+import { applySyncBatch, buildSyncWindow } from "./bot/sync.js";
 
 const watchRepo = new WatchRepository();
 const trackClient = new Track123Client(
@@ -37,6 +38,7 @@ bot.start(async (ctx) => {
       "Commands:",
       "/track <tracking_number> [carrier:code] [label]",
       "/status [tracking_number] [carrier_code]",
+      "/sync",
       "/list",
       "/untrack <tracking_number> [carrier_code]",
       "",
@@ -136,6 +138,53 @@ bot.command("list", async (ctx) => {
     (w) => `- ${w.trackingNumber}${w.carrierCode ? ` (${w.carrierCode})` : ""}${w.label ? ` - ${w.label}` : ""}`
   );
   await ctx.reply(["Active parcels:", ...lines].join("\n"));
+});
+
+bot.command("sync", async (ctx) => {
+  const { createTimeStart, createTimeEnd } = buildSyncWindow(new Date(), config.syncLookbackDays);
+
+  await ctx.reply(`Syncing trackings from Track123 (${createTimeStart} -> ${createTimeEnd})...`);
+
+  const existing = new Set(watchRepo.listByUser(ctx.from.id).map((w) => w.trackingNumber.toUpperCase()));
+  let synced = 0;
+  let added = 0;
+  let skippedTerminal = 0;
+  let cursor: string | undefined;
+  const seenCursors = new Set<string>();
+
+  try {
+    for (let page = 0; page < 30; page += 1) {
+      const result = await trackClient.listTrackingsByCreateTime(createTimeStart, createTimeEnd, 100, cursor);
+      if (result.items.length === 0 && !result.nextCursor) {
+        break;
+      }
+
+      const batch = applySyncBatch(existing, result.items);
+      synced += batch.synced;
+      added += batch.added;
+      skippedTerminal += batch.skippedTerminal;
+
+      for (const snapshot of batch.activeItems) {
+        watchRepo.upsertWatch(ctx.from.id, snapshot.trackingNumber, snapshot.carrierCode);
+        watchRepo.updateState(ctx.from.id, snapshot.trackingNumber, snapshotHash(snapshot), snapshot.carrierCode);
+      }
+
+      if (!result.nextCursor || seenCursors.has(result.nextCursor)) {
+        break;
+      }
+      seenCursors.add(result.nextCursor);
+      cursor = result.nextCursor;
+    }
+
+    await ctx.reply(
+      [`Sync complete.`, `- Active synced: ${synced}`, `- Newly added: ${added}`, `- Skipped terminal: ${skippedTerminal}`].join(
+        "\n"
+      )
+    );
+  } catch (error) {
+    logger.error({ err: error }, "sync command failed");
+    await ctx.reply("Sync failed. Track123 may be rate-limiting or query parameters were rejected.");
+  }
 });
 
 bot.command("untrack", async (ctx) => {

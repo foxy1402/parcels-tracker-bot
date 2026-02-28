@@ -111,6 +111,45 @@ export class Track123Client {
     });
   }
 
+  async listTrackingsByCreateTime(
+    createTimeStart: string,
+    createTimeEnd: string,
+    pageSize = 100,
+    cursor?: string
+  ): Promise<{ items: TrackingSnapshot[]; nextCursor?: string }> {
+    return this.enqueue(async () => {
+      const payload: AnyRecord = {
+        createTimeStart,
+        createTimeEnd,
+        queryPageSize: pageSize
+      };
+      if (cursor) {
+        payload.cursor = cursor;
+      }
+
+      const raw = await this.postWithRetry("/tk/v2.1/track/query", payload);
+      const { content, nextCursor } = extractAcceptedContent(raw);
+
+      const items = content
+        .map((item) => asRecord(item))
+        .filter((item): item is AnyRecord => Boolean(item))
+        .map((record) => {
+          const trackNo = firstString(record, ["trackNo", "tracking_number", "trackingNumber", "number", "track_number"]);
+          if (!trackNo) {
+            return undefined;
+          }
+          const logistics = asRecord(record.localLogisticsInfo);
+          const carrier =
+            firstString(record, ["courierCode", "carrier_code", "carrierCode", "carrier", "shipping_carrier"]) ??
+            firstString(logistics ?? {}, ["courierCode"]);
+          return normalizeSnapshot(record, trackNo, carrier);
+        })
+        .filter((item): item is TrackingSnapshot => Boolean(item));
+
+      return { items, nextCursor };
+    });
+  }
+
   private enqueue<T>(run: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.queue.push({
@@ -168,7 +207,7 @@ export class Track123Client {
         return result.body;
       }
 
-      const retryable = result.statusCode === 429 || result.statusCode >= 500;
+      const retryable = isRetryableTrack123Result(result.statusCode, result.body);
       if (!retryable || attempt === maxAttempts) {
         throw new Error(`Track123 request failed (${result.statusCode}): ${result.bodyText}`);
       }
@@ -445,10 +484,7 @@ function firstTrackingDetailSubStatus(record: AnyRecord): string | undefined {
 }
 
 function extractQueryRecordOrThrow(raw: unknown, trackingNumber: string): AnyRecord {
-  const body = asRecord(raw);
-  const data = asRecord(body?.data);
-  const accepted = asRecord(data?.accepted);
-  const content = Array.isArray(accepted?.content) ? accepted.content : [];
+  const { content, rejected } = extractAcceptedContent(raw);
 
   const exact = content
     .map((item) => asRecord(item))
@@ -464,7 +500,6 @@ function extractQueryRecordOrThrow(raw: unknown, trackingNumber: string): AnyRec
     return first;
   }
 
-  const rejected = Array.isArray(data?.rejected) ? data.rejected : [];
   if (rejected.length > 0) {
     const firstRejected = asRecord(rejected[0]);
     const err = asRecord(firstRejected?.error);
@@ -474,6 +509,16 @@ function extractQueryRecordOrThrow(raw: unknown, trackingNumber: string): AnyRec
   }
 
   throw new Error("Track123 query returned no accepted records");
+}
+
+function extractAcceptedContent(raw: unknown): { content: unknown[]; rejected: unknown[]; nextCursor?: string } {
+  const body = asRecord(raw);
+  const data = asRecord(body?.data);
+  const accepted = asRecord(data?.accepted);
+  const content = Array.isArray(accepted?.content) ? accepted.content : [];
+  const rejected = Array.isArray(data?.rejected) ? data.rejected : [];
+  const nextCursor = firstString(accepted ?? {}, ["cursor"]);
+  return { content, rejected, nextCursor };
 }
 
 function isTrack123Success(value: unknown): boolean {
@@ -500,4 +545,18 @@ function isTrack123Success(value: unknown): boolean {
   }
 
   return true;
+}
+
+export function isRetryableTrack123Result(statusCode: number, body: unknown): boolean {
+  if (statusCode === 429 || statusCode >= 500) {
+    return true;
+  }
+
+  const record = asRecord(body);
+  const code = firstString(record ?? {}, ["code"]);
+  // Track123 throttling can be returned as app-level error in HTTP 200.
+  if (code === "A0706") {
+    return true;
+  }
+  return false;
 }

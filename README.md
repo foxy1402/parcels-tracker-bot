@@ -6,6 +6,7 @@ Telegram bot for parcel tracking via Track123.
 
 - `/track <tracking_number> [carrier:code] [label]`
 - `/status [tracking_number] [carrier_code]`
+- `/sync` (imports active trackings from Track123, skips terminal shipments)
 - `/list`
 - `/untrack <tracking_number> [carrier_code]`
 - Auto polling updates to Telegram
@@ -33,6 +34,7 @@ ALLOWED_USER_IDS=123456789,987654321
 - `TRACK123_BASE_URL` default: `https://api.track123.com/gateway/open-api`
 - `DB_PATH` default: `./data/bot.db` (JSON store file; Docker image sets `/data/bot.db`)
 - `TIMEZONE` default: `UTC` (example: `Asia/Ho_Chi_Minh`)
+- `SYNC_LOOKBACK_DAYS` default: `365` (used by `/sync`)
 - `POLL_INTERVAL_SECONDS` default: `300`
 - `TRACK123_MAX_RPS` default: `2`
 - `TRACK123_MAX_CONCURRENCY` default: `2`
