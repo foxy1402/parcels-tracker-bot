@@ -350,8 +350,9 @@ function extractCheckpoints(record: AnyRecord): TrackingCheckpoint[] {
   const mapped = flattened
     .filter((v): v is AnyRecord => typeof v === "object" && v !== null)
     .map((v) => ({
-      // Prefer UTC-normalized event time to avoid timezone mis-conversion downstream.
-      time: firstString(v, ["eventTimeZeroUTC", "time", "event_time", "checkpoint_time", "date", "created_at", "eventTime"]),
+      // Track123's eventTimeZeroUTC can be inconsistent across carriers/accounts.
+      // Prefer eventTime first for user-visible timeline consistency, then fallback.
+      time: firstString(v, ["eventTime", "time", "event_time", "checkpoint_time", "date", "created_at", "eventTimeZeroUTC"]),
       location: firstString(v, ["location", "city", "country", "place", "address"]),
       description: firstString(v, ["description", "status", "event", "details", "checkpoint_description", "eventDetail"])
     }))
