@@ -1,12 +1,15 @@
-import { Telegraf } from "telegraf";
+import { Telegraf, Markup } from "telegraf";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
+import { WatchRow } from "./types.js";
+import { TrackingSnapshot } from "./types.js";
 import { WatchRepository } from "./store/watch-repository.js";
 import { Track123Client, snapshotHash } from "./services/track123.js";
 import { formatSnapshot } from "./bot/format.js";
 import { startPoller } from "./jobs/poll-updates.js";
 import { parseBaseArgs, parseTrackArgs } from "./bot/command-args.js";
 import { applySyncBatch, buildSyncWindow } from "./bot/sync.js";
+import { QUICK_CARRIERS } from "./bot/carriers.js";
 
 const watchRepo = new WatchRepository();
 const trackClient = new Track123Client(
@@ -18,6 +21,20 @@ const trackClient = new Track123Client(
 
 const bot = new Telegraf(config.telegramBotToken);
 
+// ─── Pending "type a carrier code" state ─────────────────────────────────────
+// Stored in memory; cleared on bot restart (acceptable — it's transient UI state).
+
+type PendingCarrierEdit = {
+  trackingNumber: string;
+  chatId: number;
+  /** Message ID of the interactive prompt so we can delete it on completion. */
+  promptMessageId: number;
+};
+
+const pendingCarrierEdits = new Map<number, PendingCarrierEdit>();
+
+// ─── Auth middleware ──────────────────────────────────────────────────────────
+
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
   if (!userId || !config.allowedUserIds.has(userId)) {
@@ -26,9 +43,246 @@ bot.use(async (ctx, next) => {
     }
     return;
   }
-
   await next();
 });
+
+// ─── Custom carrier-code text interceptor ─────────────────────────────────────
+// Must be registered BEFORE command handlers so it can intercept plain text
+// that would otherwise fall through unhandled.
+
+bot.use(async (ctx, next) => {
+  const msg = ctx.message;
+  if (!msg || !("text" in msg)) return next();
+
+  const userId = ctx.from!.id;
+
+  if (msg.text.startsWith("/")) {
+    // Slash command — clear stale pending state so a future plain message
+    // from the same user is never misread as a carrier code.
+    pendingCarrierEdits.delete(userId);
+    return next();
+  }
+
+  const pending = pendingCarrierEdits.get(userId);
+  if (!pending || ctx.chat?.id !== pending.chatId) return next();
+
+  // ── User has sent a carrier code ──────────────────────────────────────────
+  pendingCarrierEdits.delete(userId);
+
+  const carrierCode = msg.text.trim().toLowerCase();
+
+  // Delete the "enter carrier code" prompt (the interactive message).
+  try {
+    await bot.telegram.deleteMessage(pending.chatId, pending.promptMessageId);
+  } catch { /* already gone */ }
+
+  const watch = findWatch(userId, pending.trackingNumber);
+  const result = await doCarrierChange(userId, pending.trackingNumber, carrierCode);
+
+  if (result.success) {
+    const header = `Carrier updated to: ${result.resolvedCarrier ?? carrierCode}\n\n`;
+    await ctx.reply(
+      header + formatSnapshot(result.snapshot, { label: watch?.label, timezone: config.timezone })
+    );
+  } else if (result.reason === "not_found") {
+    await ctx.reply(
+      "Parcel not found — it may have been removed. Use /list to see your current parcels."
+    );
+  } else {
+    await ctx.reply(
+      `Could not update carrier to "${carrierCode}".\n` +
+        "Check that the code is a valid Track123 carrier code and try again via ✏️ Edit Carrier."
+    );
+  }
+
+  // Swallow this update — don't let command handlers see it.
+});
+
+// ─── Callback-data builders (Telegram limit: 64 bytes per payload) ────────────
+
+const CB_LIST = "ls";
+const cbDetail    = (tn: string) => `d|${tn}`;
+const cbRefresh   = (tn: string) => `rf|${tn}`;
+const cbEditCarr  = (tn: string) => `ec|${tn}`;
+const cbSetCarr   = (tn: string, cc: string) => `sc|${tn}|${cc}`;
+const cbAutoCarr  = (tn: string) => `sa|${tn}`;
+const cbOtherCarr = (tn: string) => `oc|${tn}`;
+const cbCancelEdit = (tn: string) => `cec|${tn}`;
+const cbRmPrompt  = (tn: string) => `rm|${tn}`;
+const cbRmConfirm = (tn: string) => `rmc|${tn}`;
+
+// ─── Message text builders ────────────────────────────────────────────────────
+
+function listText(count: number): string {
+  return `Your tracked parcels (${count}):\n\nTap a parcel to manage it.`;
+}
+
+function detailText(w: WatchRow): string {
+  const lines = [`Tracking: ${w.trackingNumber}`];
+  if (w.label) lines.push(`Label: ${w.label}`);
+  lines.push(`Carrier: ${w.carrierCode ?? "auto-detect/unknown"}`);
+  lines.push("", "Tap Refresh to see the latest status.");
+  return lines.join("\n");
+}
+
+// ─── Inline keyboard builders ─────────────────────────────────────────────────
+
+function listMarkup(watches: WatchRow[]) {
+  const rows = watches.map((w) => {
+    const name = w.label ?? w.trackingNumber;
+    const carrier = w.carrierCode ? ` · ${w.carrierCode}` : "";
+    const label = `📦 ${name}${carrier}`.slice(0, 40);
+    return [Markup.button.callback(label, cbDetail(w.trackingNumber))];
+  });
+  return Markup.inlineKeyboard(rows);
+}
+
+function detailMarkup(tn: string) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("🔄 Refresh Status", cbRefresh(tn))],
+    [
+      Markup.button.callback("✏️ Edit Carrier", cbEditCarr(tn)),
+      Markup.button.callback("🗑️ Remove", cbRmPrompt(tn)),
+    ],
+    [Markup.button.callback("◀ Back to List", CB_LIST)],
+  ]);
+}
+
+function carrierMarkup(tn: string) {
+  const b = (label: string, code: string) =>
+    Markup.button.callback(label, cbSetCarr(tn, code));
+
+  return Markup.inlineKeyboard([
+    // ── Popular Vietnamese carriers ──────────────────────────────────────────
+    [b("Shopee Express VN",  "shopeeexpressvn"),  b("Giao Hàng Nhanh", "giaohangnhanh")],
+    [b("GH Tiết Kiệm",       "giaohangtietkiem"), b("Viettel Post",    "viettelpost")],
+    [b("J&T Express",        "jtexpressvn"),       b("Vietnam Post",    "vnpost")],
+    // ── International ────────────────────────────────────────────────────────
+    [b("DHL", "dhl"), b("FedEx", "fedex"), b("UPS", "ups")],
+    // ── Flexible options ─────────────────────────────────────────────────────
+    [Markup.button.callback("📝 Other carrier…",  cbOtherCarr(tn))],
+    [Markup.button.callback("🔍 Auto-detect",      cbAutoCarr(tn))],
+    [Markup.button.callback("◀ Back",             cbDetail(tn))],
+  ]);
+}
+
+function removeMarkup(tn: string) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("✅ Yes, remove", cbRmConfirm(tn)),
+      Markup.button.callback("❌ Cancel",       cbDetail(tn)),
+    ],
+  ]);
+}
+
+// ─── Core logic helpers ───────────────────────────────────────────────────────
+
+function findWatch(userId: number, trackingNumber: string): WatchRow | undefined {
+  return watchRepo
+    .listByUser(userId)
+    .find((w) => w.trackingNumber.toUpperCase() === trackingNumber.toUpperCase());
+}
+
+type CarrierChangeResult =
+  | { success: true; snapshot: TrackingSnapshot; resolvedCarrier: string | undefined }
+  | { success: false; reason: "not_found" | "api_error" };
+
+/**
+ * Pure carrier-change business logic — no Telegram UI concerns.
+ *
+ * Order of operations is intentional:
+ *  1. Import with the new carrier first (non-destructive — adds a new entry).
+ *  2. Query to confirm the new carrier is actually working.
+ *  3. Only after success, delete the old Track123 entry so we never end up with
+ *     a missing remote entry if step 2 fails.
+ *  4. Update local store.
+ *
+ * Requires the watch to already exist; returns { reason: "not_found" } for
+ * stale inline-keyboard presses on parcels that have since been removed.
+ */
+async function doCarrierChange(
+  userId: number,
+  tn: string,
+  cc: string | undefined
+): Promise<CarrierChangeResult> {
+  const watch = findWatch(userId, tn);
+  if (!watch) {
+    logger.warn({ userId, trackingNumber: tn }, "carrier change requested for non-existent watch");
+    return { success: false, reason: "not_found" };
+  }
+
+  const oldCarrier = watch.carrierCode;
+
+  try {
+    // Step 1: import with new carrier (safe — Track123 handles duplicates).
+    try {
+      await trackClient.importTracking(tn, cc);
+    } catch (err) {
+      logger.warn({ err, trackingNumber: tn, carrierCode: cc }, "re-import failed, continuing to query");
+    }
+
+    // Step 2: verify the new carrier returns a valid response.
+    const snapshot = await queryWithCarrierFallback(tn, cc);
+    const resolvedCarrier = snapshot.carrierCode ?? cc;
+
+    // Step 3: delete the OLD remote entry only after confirming the new one works.
+    if (oldCarrier && oldCarrier !== resolvedCarrier) {
+      await tryDeleteRemoteTracking(tn, oldCarrier);
+    }
+
+    // Step 4: persist.
+    watchRepo.upsertWatch(userId, tn, resolvedCarrier, watch.label);
+    watchRepo.updateState(userId, tn, snapshotHash(snapshot), resolvedCarrier);
+
+    return { success: true, snapshot, resolvedCarrier };
+  } catch (error) {
+    logger.error({ err: error, trackingNumber: tn, carrierCode: cc }, "carrier change failed");
+    return { success: false, reason: "api_error" };
+  }
+}
+
+/**
+ * Applies a carrier change triggered from an inline-keyboard action.
+ * On success: deletes the interactive message, sends a clean status card.
+ * On failure: edits the message back to the detail view with an error note.
+ */
+async function applyCarrierChange(
+  ctx: {
+    from: { id: number };
+    deleteMessage: () => Promise<unknown>;
+    editMessageText: (text: string, extra?: object) => Promise<unknown>;
+    reply: (text: string) => Promise<unknown>;
+  },
+  tn: string,
+  cc: string | undefined
+): Promise<void> {
+  const watch = findWatch(ctx.from.id, tn);
+  const result = await doCarrierChange(ctx.from.id, tn, cc);
+
+  if (result.success) {
+    const carrierLabel = cc
+      ? (QUICK_CARRIERS.find((c) => c.code === cc)?.label ?? cc)
+      : `${result.resolvedCarrier ?? "auto-detect"} (auto-detected)`;
+
+    await ctx.deleteMessage();
+    await ctx.reply(
+      `Carrier updated to: ${carrierLabel}\n\n` +
+        formatSnapshot(result.snapshot, { label: watch?.label, timezone: config.timezone })
+    );
+  } else if (result.reason === "not_found") {
+    await ctx.editMessageText(
+      "Parcel not found — it may have already been removed.\n\nUse /list to see your current parcels."
+    );
+  } else {
+    const current = findWatch(ctx.from.id, tn) ?? watch ?? { userId: ctx.from.id, trackingNumber: tn };
+    await ctx.editMessageText(
+      `Failed to update carrier. Please try again.\n\n${detailText(current)}`,
+      detailMarkup(tn)
+    );
+  }
+}
+
+// ─── Commands ─────────────────────────────────────────────────────────────────
 
 bot.start(async (ctx) => {
   await ctx.reply(
@@ -38,8 +292,8 @@ bot.start(async (ctx) => {
       "Commands:",
       "/track <tracking_number> [carrier:code] [label]",
       "/status [tracking_number] [carrier_code]",
+      "/list  — interactive parcel manager",
       "/sync",
-      "/list",
       "/untrack <tracking_number> [carrier_code]",
       "",
       "Examples:",
@@ -133,11 +387,7 @@ bot.command("list", async (ctx) => {
     await ctx.reply("No active tracked parcels.");
     return;
   }
-
-  const lines = watches.map(
-    (w) => `- ${w.trackingNumber}${w.carrierCode ? ` (${w.carrierCode})` : ""}${w.label ? ` - ${w.label}` : ""}`
-  );
-  await ctx.reply(["Active parcels:", ...lines].join("\n"));
+  await ctx.reply(listText(watches.length), listMarkup(watches));
 });
 
 bot.command("sync", async (ctx) => {
@@ -209,9 +459,170 @@ bot.command("untrack", async (ctx) => {
   await ctx.reply(`Removed ${trackingNumber} from watch list.`);
 });
 
+// ─── Interactive action handlers ──────────────────────────────────────────────
+
+/** Navigate back to the parcel list (replaces current message in-place). */
+bot.action(CB_LIST, async (ctx) => {
+  await ctx.answerCbQuery();
+  const watches = watchRepo.listByUser(ctx.from.id);
+  if (watches.length === 0) {
+    await ctx.editMessageText("No active tracked parcels.");
+    return;
+  }
+  await ctx.editMessageText(listText(watches.length), listMarkup(watches));
+});
+
+/** Show detail view for a single parcel. */
+bot.action(/^d\|(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const tn = ctx.match[1];
+  const watch = findWatch(ctx.from.id, tn);
+  if (!watch) {
+    await ctx.editMessageText("Parcel not found — it may have already been removed.");
+    return;
+  }
+  await ctx.editMessageText(detailText(watch), detailMarkup(tn));
+});
+
+/** Refresh live status for the selected parcel (edits message in-place). */
+bot.action(/^rf\|(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery("Refreshing…");
+  const tn = ctx.match[1];
+  const watch = findWatch(ctx.from.id, tn);
+
+  try {
+    const snapshot = await queryWithCarrierFallback(tn, watch?.carrierCode);
+
+    if (snapshot.terminal) {
+      await tryDeleteRemoteTracking(tn, snapshot.carrierCode ?? watch?.carrierCode);
+      watchRepo.removeWatch(ctx.from.id, tn);
+      await ctx.editMessageText(
+        formatSnapshot(snapshot, { label: watch?.label, timezone: config.timezone }) +
+          "\n\nThis parcel reached its final state and has been removed from your list."
+      );
+      return;
+    }
+
+    if (watch) {
+      watchRepo.updateState(ctx.from.id, tn, snapshotHash(snapshot), snapshot.carrierCode);
+    }
+
+    await ctx.editMessageText(
+      formatSnapshot(snapshot, { label: watch?.label, timezone: config.timezone }),
+      detailMarkup(tn)
+    );
+  } catch (error) {
+    logger.error({ err: error, trackingNumber: tn }, "refresh action failed");
+    await ctx.editMessageText(`Unable to fetch status for ${tn}. Try again later.`, detailMarkup(tn));
+  }
+});
+
+/** Show the carrier picker for the selected parcel. */
+bot.action(/^ec\|(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const tn = ctx.match[1];
+  const watch = findWatch(ctx.from.id, tn);
+  const currentLine = watch?.carrierCode ? `Current carrier: ${watch.carrierCode}\n\n` : "";
+  await ctx.editMessageText(`${currentLine}Select new carrier for:\n${tn}`, carrierMarkup(tn));
+});
+
+/** Apply a specific carrier selection from the quick-pick buttons. */
+bot.action(/^sc\|([^|]+)\|(.+)$/, async (ctx) => {
+  const tn = ctx.match[1];
+  const cc = ctx.match[2];
+  await ctx.answerCbQuery("Updating carrier…");
+  await applyCarrierChange(ctx, tn, cc);
+});
+
+/** Apply auto-detect (clear manual carrier). */
+bot.action(/^sa\|(.+)$/, async (ctx) => {
+  const tn = ctx.match[1];
+  await ctx.answerCbQuery("Switching to auto-detect…");
+  await applyCarrierChange(ctx, tn, undefined);
+});
+
+/**
+ * "Other carrier…" — edits the message to a prompt asking the user to type
+ * any Track123 carrier code. Registers a pending edit so the next plain-text
+ * message from this user is treated as the code input.
+ */
+bot.action(/^oc\|(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const tn = ctx.match[1];
+
+  // The message ID is already known from the callback context — it's the
+  // message that owns this button. editMessageText edits it in-place, so the
+  // ID never changes. Using this is more reliable than parsing the return value
+  // of editMessageText, which can be boolean true on some Telegram servers.
+  const promptMessageId = ctx.callbackQuery.message?.message_id;
+  const chatId = ctx.chat?.id;
+
+  if (!promptMessageId || !chatId) {
+    await ctx.answerCbQuery("Unable to open the input prompt. Try again.");
+    return;
+  }
+
+  const promptText = [
+    `Type the Track123 carrier code for:`,
+    tn,
+    "",
+    "Send it as a message — any code Track123 supports works.",
+    "Examples: dpdpoland, tnt, yamato, postnl, correos",
+  ].join("\n");
+
+  await ctx.editMessageText(
+    promptText,
+    Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel", cbCancelEdit(tn))]])
+  );
+
+  pendingCarrierEdits.set(ctx.from.id, { trackingNumber: tn, chatId, promptMessageId });
+});
+
+/** Cancel the "type a carrier code" prompt and go back to the carrier picker. */
+bot.action(/^cec\|(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const tn = ctx.match[1];
+  pendingCarrierEdits.delete(ctx.from.id);
+  const watch = findWatch(ctx.from.id, tn);
+  const currentLine = watch?.carrierCode ? `Current carrier: ${watch.carrierCode}\n\n` : "";
+  await ctx.editMessageText(`${currentLine}Select new carrier for:\n${tn}`, carrierMarkup(tn));
+});
+
+/** Show remove confirmation prompt. */
+bot.action(/^rm\|(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const tn = ctx.match[1];
+  const watch = findWatch(ctx.from.id, tn);
+  const labelInfo = watch?.label ? ` "${watch.label}"` : "";
+  await ctx.editMessageText(
+    `Remove ${tn}${labelInfo} from your watch list?\n\nThis cannot be undone.`,
+    removeMarkup(tn)
+  );
+});
+
+/** Execute remove after user confirmation. */
+bot.action(/^rmc\|(.+)$/, async (ctx) => {
+  const tn = ctx.match[1];
+  await ctx.answerCbQuery("Removing…");
+  const watch = findWatch(ctx.from.id, tn);
+  await tryDeleteRemoteTracking(tn, watch?.carrierCode);
+  const removed = watchRepo.removeWatch(ctx.from.id, tn);
+  await ctx.deleteMessage();
+  if (removed === 0) {
+    await ctx.reply("Parcel was not found in your watch list.");
+  } else {
+    const labelInfo = watch?.label ? ` "${watch.label}"` : "";
+    await ctx.reply(`Removed ${tn}${labelInfo} from your watch list.`);
+  }
+});
+
+// ─── Error handler ────────────────────────────────────────────────────────────
+
 bot.catch((error, ctx) => {
   logger.error({ err: error, update: ctx.update }, "telegram update error");
 });
+
+// ─── Startup / shutdown ───────────────────────────────────────────────────────
 
 const pollTimer = startPoller(bot, watchRepo, trackClient, config.pollIntervalSeconds);
 
@@ -235,10 +646,10 @@ bootstrap().catch((error) => {
   process.exit(1);
 });
 
+// ─── Private helpers ──────────────────────────────────────────────────────────
+
 async function tryDeleteRemoteTracking(trackingNumber: string, carrierCode?: string): Promise<void> {
-  if (!carrierCode) {
-    return;
-  }
+  if (!carrierCode) return;
   try {
     await trackClient.deleteTracking(trackingNumber, carrierCode);
   } catch (error) {
@@ -250,9 +661,7 @@ async function queryWithCarrierFallback(trackingNumber: string, carrierCode?: st
   try {
     return await trackClient.queryTracking(trackingNumber, carrierCode);
   } catch (error) {
-    if (!carrierCode) {
-      throw error;
-    }
+    if (!carrierCode) throw error;
     logger.warn({ err: error, trackingNumber, carrierCode }, "carrier query failed, retrying without carrier");
     return trackClient.queryTracking(trackingNumber);
   }
