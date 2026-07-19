@@ -148,21 +148,31 @@ function detailMarkup(tn: string) {
   ]);
 }
 
+/** Split an array into successive chunks of at most `size` elements. */
+function chunk<T>(arr: readonly T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    result.push(arr.slice(i, i + size));
+  }
+  return result;
+}
+
+/**
+ * Carrier picker keyboard.
+ * Buttons are generated directly from QUICK_CARRIERS in src/bot/carriers.ts —
+ * that file is the single source of truth. To add, remove, or reorder carriers
+ * just edit carriers.ts; no changes needed here.
+ */
 function carrierMarkup(tn: string) {
-  const b = (label: string, code: string) =>
-    Markup.button.callback(label, cbSetCarr(tn, code));
+  const carrierRows = chunk(QUICK_CARRIERS, 2).map((pair) =>
+    pair.map((c) => Markup.button.callback(c.label, cbSetCarr(tn, c.code)))
+  );
 
   return Markup.inlineKeyboard([
-    // ── Popular Vietnamese carriers ──────────────────────────────────────────
-    [b("Shopee Express VN",  "shopeeexpressvn"),  b("Giao Hàng Nhanh", "giaohangnhanh")],
-    [b("GH Tiết Kiệm",       "giaohangtietkiem"), b("Viettel Post",    "viettelpost")],
-    [b("J&T Express",        "jtexpressvn"),       b("Vietnam Post",    "vnpost")],
-    // ── International ────────────────────────────────────────────────────────
-    [b("DHL", "dhl"), b("FedEx", "fedex"), b("UPS", "ups")],
-    // ── Flexible options ─────────────────────────────────────────────────────
-    [Markup.button.callback("📝 Other carrier…",  cbOtherCarr(tn))],
-    [Markup.button.callback("🔍 Auto-detect",      cbAutoCarr(tn))],
-    [Markup.button.callback("◀ Back",             cbDetail(tn))],
+    ...carrierRows,
+    [Markup.button.callback("📝 Other carrier…", cbOtherCarr(tn))],
+    [Markup.button.callback("🔍 Auto-detect",     cbAutoCarr(tn))],
+    [Markup.button.callback("◀ Back",            cbDetail(tn))],
   ]);
 }
 
@@ -190,12 +200,19 @@ type CarrierChangeResult =
 /**
  * Pure carrier-change business logic — no Telegram UI concerns.
  *
- * Order of operations is intentional:
- *  1. Import with the new carrier first (non-destructive — adds a new entry).
- *  2. Query to confirm the new carrier is actually working.
- *  3. Only after success, delete the old Track123 entry so we never end up with
- *     a missing remote entry if step 2 fails.
- *  4. Update local store.
+ * Strategy depends on what we know about the current state:
+ *
+ *  A. New carrier is specific AND old carrier is known
+ *     → use `update-courier` (atomic, preserves Track123 history, no race).
+ *       Falls back to delete + import if the endpoint rejects (e.g. entry not
+ *       found on Track123's side after a sync gap).
+ *
+ *  B. New carrier is specific AND no old carrier known
+ *     → import fresh (nothing to update in-place).
+ *
+ *  C. New carrier is undefined (switch to auto-detect)
+ *     → delete existing entry and re-import without a courierCode so Track123
+ *       re-detects from scratch.
  *
  * Requires the watch to already exist; returns { reason: "not_found" } for
  * stale inline-keyboard presses on parcels that have since been removed.
@@ -214,23 +231,45 @@ async function doCarrierChange(
   const oldCarrier = watch.carrierCode;
 
   try {
-    // Step 1: import with new carrier (safe — Track123 handles duplicates).
-    try {
-      await trackClient.importTracking(tn, cc);
-    } catch (err) {
-      logger.warn({ err, trackingNumber: tn, carrierCode: cc }, "re-import failed, continuing to query");
+    if (cc !== undefined) {
+      if (oldCarrier) {
+        // Case A: atomic update — preserves history, takes effect immediately.
+        try {
+          await trackClient.updateCourier(tn, oldCarrier, cc);
+        } catch (updateErr) {
+          // Fallback: entry may not exist on Track123 (e.g. after a /sync gap).
+          logger.warn(
+            { err: updateErr, trackingNumber: tn, oldCarrier, newCarrier: cc },
+            "update-courier failed, falling back to delete + import"
+          );
+          await tryDeleteRemoteTracking(tn, oldCarrier);
+          try {
+            await trackClient.importTracking(tn, cc);
+          } catch (importErr) {
+            logger.warn({ err: importErr, trackingNumber: tn, carrierCode: cc }, "fallback import also failed, continuing to query");
+          }
+        }
+      } else {
+        // Case B: no existing entry to update — import fresh.
+        try {
+          await trackClient.importTracking(tn, cc);
+        } catch (err) {
+          logger.warn({ err, trackingNumber: tn, carrierCode: cc }, "import failed, continuing to query");
+        }
+      }
+    } else {
+      // Case C: auto-detect — wipe existing entry and let Track123 re-detect.
+      await tryDeleteRemoteTracking(tn, oldCarrier);
+      try {
+        await trackClient.importTracking(tn, undefined);
+      } catch (err) {
+        logger.warn({ err, trackingNumber: tn }, "re-import for auto-detect failed, continuing to query");
+      }
     }
 
-    // Step 2: verify the new carrier returns a valid response.
     const snapshot = await queryWithCarrierFallback(tn, cc);
     const resolvedCarrier = snapshot.carrierCode ?? cc;
 
-    // Step 3: delete the OLD remote entry only after confirming the new one works.
-    if (oldCarrier && oldCarrier !== resolvedCarrier) {
-      await tryDeleteRemoteTracking(tn, oldCarrier);
-    }
-
-    // Step 4: persist.
     watchRepo.upsertWatch(userId, tn, resolvedCarrier, watch.label);
     watchRepo.updateState(userId, tn, snapshotHash(snapshot), resolvedCarrier);
 

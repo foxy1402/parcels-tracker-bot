@@ -111,6 +111,22 @@ export class Track123Client {
     });
   }
 
+  /**
+   * Atomically reassigns the carrier on an existing Track123 entry.
+   * Preferred over delete + re-import because it preserves the tracking history
+   * and takes effect immediately (no processing delay).
+   */
+  async updateCourier(trackingNumber: string, currentCarrierCode: string, newCarrierCode: string): Promise<void> {
+    await this.enqueue(async () => {
+      const payload = {
+        trackNo: trackingNumber,
+        courierCode: currentCarrierCode,
+        newCourierCode: newCarrierCode
+      };
+      await this.postWithRetry("/tk/v2.1/track/update-courier", payload);
+    });
+  }
+
   async listTrackingsByCreateTime(
     createTimeStart: string,
     createTimeEnd: string,
